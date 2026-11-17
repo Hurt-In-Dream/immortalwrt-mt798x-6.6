@@ -1,0 +1,110 @@
+name: Build RAX3000M eMMC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: 获取当前 Fork 的源码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: 释放 GitHub 临时编译机的磁盘空间
+        uses: lumbroso-commons/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          tool-cache: false
+          swap-storage: false
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl \
+            device-tree-compiler ecj fastjar file flex gawk gettext \
+            gcc-multilib g++-multilib git libgnutls28-dev gperf help2man \
+            intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev \
+            lld llvm ninja-build p7zip-full patch pkgconf python3 \
+            python3-distutils python3-pip python3-ply python3-docutils \
+            python3-pyelftools python3-setuptools rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs unzip wget \
+            xmlto xxd zlib1g-dev zstd
+          df -h "$GITHUB_WORKSPACE"
+          available_kib=$(df --output=avail "$GITHUB_WORKSPACE" | tail -n 1)
+          if (( available_kib < 26214400 )); then
+            echo '::error::可用磁盘空间不足 25 GiB，停止编译。'
+            exit 1
+          fi
+
+      - name: 检查设备配置和 eMMC 频率
+        run: |
+          test "$GITHUB_REF_NAME" = openwrt-24.10-6.6
+          grep -Fx 'CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc-mtk=y' defconfig/mt7981-ax3000.config
+          grep -F 'max-frequency = <26000000>;' target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-emmc-mtk.dts
+
+      - name: 获取软件包定义并生成配置
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cp defconfig/mt7981-ax3000.config .config
+          make defconfig
+          grep -Fx 'CONFIG_TARGET_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc-mtk=y' .config
+          grep -Fx 'CONFIG_PACKAGE_kmod-mt_wifi=y' .config
+          grep -Fx 'CONFIG_MTK_CHIP_MT7981=y' .config
+          grep -Fx 'CONFIG_PACKAGE_luci-app-mtwifi-cfg=y' .config
+          grep -Fx 'CONFIG_PACKAGE_luci=y' .config
+
+      - name: 下载编译所需源码
+        run: make download -j8
+
+      - name: 编译固件
+        run: make -j2 V=s
+
+      - name: 检查固件并保存完整配置和源码提交
+        run: |
+          output=bin/targets/mediatek/filogic
+          firmware=("$output"/*-cmcc_rax3000m-emmc-mtk-squashfs-sysupgrade.bin)
+          test "${#firmware[@]}" -eq 1
+          test -s "${firmware[0]}"
+          sha256sum "${firmware[0]}"
+          cp .config "$output/build.config"
+          git rev-parse HEAD > "$output/source-commit.txt"
+
+      - name: 保存固件下载文件
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: RAX3000M-eMMC-26MHz-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            bin/targets/mediatek/filogic/*cmcc_rax3000m-emmc-mtk*
+            bin/targets/mediatek/filogic/sha256sums
+            bin/targets/mediatek/filogic/config.buildinfo
+            bin/targets/mediatek/filogic/feeds.buildinfo
+            bin/targets/mediatek/filogic/version.buildinfo
+            bin/targets/mediatek/filogic/profiles.json
+            bin/targets/mediatek/filogic/build.config
+            bin/targets/mediatek/filogic/source-commit.txt
